@@ -612,32 +612,44 @@ impl GpuMiner {
         let stats = Arc::clone(&self.stats);
         let gpu_settings = self.gpu_settings.clone();
 
-        // Start GPU mining threads manually (same approach as in run() method)
+        // Start GPU mining threads with improved device type awareness
         for (i, device) in devices.iter().enumerate() {
             let device_clone = device.clone();
             let job_rx_clone = job_rx.resubscribe();
             let share_tx_clone = share_tx.clone();
             let stats_thread_clone = Arc::clone(&stats);
             let device_name = device.name().to_string();
+            let device_type = device.device_type();
             let estimated_hashrate = threads[i].estimated_hashrate;
             let thread_id = threads[i].thread_id; // Use the actual thread ID (0 for GPU-only, offset for hybrid)
             let settings_clone = gpu_settings.clone();
 
             info!(target: LOG_TARGET,
-                "🎮 Launching GPU mining thread {} for {} (~{:.1} MH/s, {}% intensity)",
-                thread_id, device_name, estimated_hashrate, gpu_settings.intensity
+                "🎮 Launching GPU mining thread {} for {} ({:?}) (~{:.1} MH/s, {}% intensity)",
+                thread_id, device_name, device_type, estimated_hashrate, gpu_settings.intensity
             );
 
-            // Spawn GPU mining thread using std::thread for OpenCL safety
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create GPU thread runtime");
+            // Spawn GPU mining thread using blocking task for OpenCL safety
+            // Use spawn_blocking with proper device context isolation
+            let device_type_for_thread = device_type.clone();
+            let thread_id_for_spawn = thread_id;
+            tokio::task::spawn_blocking(move || {
+                // Set thread name for better debugging
+                let thread_name = format!(
+                    "gpu-miner-{}-{:?}",
+                    thread_id_for_spawn, device_type_for_thread
+                );
 
+                // Use a blocking context since OpenCL objects are not Send/Sync
+                let rt = tokio::runtime::Handle::current();
                 rt.block_on(async {
+                    info!(target: LOG_TARGET,
+                        "🚀 GPU mining thread {} ({:?}) started: {}",
+                        thread_id_for_spawn, device_type_for_thread, thread_name
+                    );
+
                     super::manager::GpuManager::gpu_mining_loop_with_settings(
-                        thread_id,
+                        thread_id_for_spawn,
                         device_clone,
                         job_rx_clone,
                         share_tx_clone,
@@ -658,6 +670,24 @@ impl GpuMiner {
 }
 
 // Changelog:
+// - v1.1.5-gpu-prioritization-fix (2025-07-25): Fixed integrated GPU over-utilization in multi-GPU setups
+//   *** GPU PRIORITIZATION & SELECTION ***:
+//   - Added automatic GPU device prioritization (dedicated > unknown > integrated)
+//   - Devices are now sorted by type and compute units to prefer most powerful GPUs
+//   - Added auto-exclusion of integrated GPUs when dedicated GPUs are present
+//   - Enhanced thread spawning with device type awareness and better debugging
+//   - Added --allow-integrated-gpu flag to override automatic integrated GPU exclusion
+//   *** PERFORMANCE IMPROVEMENTS ***:
+//   - Prevents system slowdown from integrated GPU over-utilization
+//   - Ensures discrete GPUs are used first in multi-GPU systems
+//   - Better thread isolation with device-specific thread naming
+//   - Enhanced logging to show GPU type and selection priority
+//   *** TECHNICAL CHANGES ***:
+//   - Modified manager.rs to sort devices by type and capabilities
+//   - Added GpuSettings.allow_integrated field for user control
+//   - Enhanced thread spawning with device type logging
+//   - Fixed closure lifetime issues in thread spawning
+//   - Improved error handling and debugging information
 // - v1.1.4-connection-monitoring (2025-06-27): Added connection latency monitoring
 //   *** CONNECTION MONITORING ***:
 //   - Added handle_connection_events() method that updates pool latency every 5 seconds

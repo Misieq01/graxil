@@ -43,6 +43,8 @@ pub struct GpuSettings {
     pub power_limit: Option<u8>,
     /// GPU temperature limit (60-85°C)
     pub temp_limit: Option<u8>,
+    /// Allow integrated GPU usage
+    pub allow_integrated: bool,
 }
 
 impl Default for GpuSettings {
@@ -52,6 +54,7 @@ impl Default for GpuSettings {
             batch_size: None,
             power_limit: None,
             temp_limit: None,
+            allow_integrated: false,
         }
     }
 }
@@ -286,6 +289,17 @@ pub struct Args {
         help = "GPU temperature limit (60-85°C) [75=balanced, 70=safe, 80=aggressive]"
     )]
     pub gpu_temp_limit: Option<u8>,
+
+    /// Allow integrated GPU usage in addition to discrete GPUs
+    /// By default, integrated GPUs are auto-excluded when discrete GPUs are present
+    /// to prevent performance issues and system slowdown
+    /// Use this flag to explicitly allow integrated GPU mining
+    #[cfg(any(feature = "gpu", feature = "hybrid"))]
+    #[arg(
+        long,
+        help = "Allow integrated GPUs for mining (normally auto-excluded when discrete GPUs available)"
+    )]
+    pub allow_integrated_gpu: bool,
 }
 
 /// Raw job data received from the mining pool
@@ -501,6 +515,7 @@ impl Args {
             batch_size: self.gpu_batch_size.map(|b| b.max(1_000).min(1_000_000)),
             power_limit: self.gpu_power_limit.map(|p| p.max(50).min(110)),
             temp_limit: self.gpu_temp_limit.map(|t| t.max(60).min(85)),
+            allow_integrated: self.allow_integrated_gpu,
         }
     }
 

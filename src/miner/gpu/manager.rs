@@ -123,11 +123,12 @@ impl GpuManager {
     pub fn initialize(&mut self) -> Result<()> {
         info!(target: LOG_TARGET,"🎮 Initializing GPU mining...");
         info!(target: LOG_TARGET,
-            "🎮 GPU Settings: intensity={}%, batch={:?}, power={:?}%, temp={:?}°C",
+            "🎮 GPU Settings: intensity={}%, batch={:?}, power={:?}%, temp={:?}°C, allow_integrated={}",
             self.gpu_settings.intensity,
             self.gpu_settings.batch_size,
             self.gpu_settings.power_limit,
-            self.gpu_settings.temp_limit
+            self.gpu_settings.temp_limit,
+            self.gpu_settings.allow_integrated
         );
 
         // Detect available GPU devices
@@ -138,8 +139,8 @@ impl GpuManager {
             return Err(Error::msg("No OpenCL GPU devices found"));
         }
 
-        // Filter suitable devices
-        let suitable_devices: Vec<_> = detected_devices
+        // Filter suitable devices and prioritize discrete GPUs
+        let mut suitable_devices: Vec<_> = detected_devices
             .into_iter()
             .filter(|device| {
                 let suitable = device.is_suitable_for_mining();
@@ -152,6 +153,68 @@ impl GpuManager {
                 suitable && !is_excluded
             })
             .collect();
+
+        // Prioritize discrete GPUs over integrated ones to prevent performance issues
+        suitable_devices.sort_by(|a, b| {
+            use crate::miner::gpu::opencl::device::GpuDeviceType;
+            match (a.device_type(), b.device_type()) {
+                // Dedicated GPUs come first
+                (GpuDeviceType::Dedicated, GpuDeviceType::Integrated) => std::cmp::Ordering::Less,
+                (GpuDeviceType::Integrated, GpuDeviceType::Dedicated) => {
+                    std::cmp::Ordering::Greater
+                }
+                // Unknown devices come after dedicated but before integrated
+                (GpuDeviceType::Dedicated, GpuDeviceType::Unknown) => std::cmp::Ordering::Less,
+                (GpuDeviceType::Unknown, GpuDeviceType::Dedicated) => std::cmp::Ordering::Greater,
+                (GpuDeviceType::Unknown, GpuDeviceType::Integrated) => std::cmp::Ordering::Less,
+                (GpuDeviceType::Integrated, GpuDeviceType::Unknown) => std::cmp::Ordering::Greater,
+                // Same types: sort by compute units (more powerful first)
+                _ => b.max_compute_units().cmp(&a.max_compute_units()),
+            }
+        });
+
+        // Log the prioritized device order
+        info!(target: LOG_TARGET,"🎯 GPU device priority order:");
+        for (i, device) in suitable_devices.iter().enumerate() {
+            info!(target: LOG_TARGET,
+                "  {}. {} - Type: {:?}, CUs: {}",
+                i + 1, device.name(), device.device_type(), device.max_compute_units()
+            );
+        }
+
+        // Auto-exclude integrated GPUs if dedicated ones are available and no manual exclusions
+        if self.excluded_devices.is_empty() && !self.gpu_settings.allow_integrated {
+            let has_dedicated = suitable_devices.iter().any(|d| {
+                matches!(
+                    d.device_type(),
+                    crate::miner::gpu::opencl::device::GpuDeviceType::Dedicated
+                )
+            });
+
+            if has_dedicated {
+                let original_count = suitable_devices.len();
+                suitable_devices.retain(|device| {
+                    let keep = !matches!(
+                        device.device_type(),
+                        crate::miner::gpu::opencl::device::GpuDeviceType::Integrated
+                    );
+                    if !keep {
+                        warn!(target: LOG_TARGET,
+                            "🚫 Auto-excluding integrated GPU: {} (dedicated GPUs available)",
+                            device.name()
+                        );
+                    }
+                    keep
+                });
+
+                if suitable_devices.len() < original_count {
+                    info!(target: LOG_TARGET,
+                        "💡 Auto-excluded {} integrated GPU(s) to prevent performance issues. Use --allow-integrated-gpu to override.",
+                        original_count - suitable_devices.len()
+                    );
+                }
+            }
+        }
 
         if suitable_devices.is_empty() {
             return Err(Error::msg("No suitable GPU devices found for mining"));
@@ -582,6 +645,23 @@ impl Default for GpuManager {
 }
 
 // Changelog:
+// - v3.2.3-gpu-prioritization-fix (2025-07-25): Fixed integrated GPU over-utilization in multi-GPU setups
+//   *** GPU DEVICE PRIORITIZATION ***:
+//   - Added automatic GPU device sorting by type: Dedicated > Unknown > Integrated
+//   - Within same type, sort by compute units (more powerful first)
+//   - Auto-exclude integrated GPUs when dedicated GPUs are available (unless overridden)
+//   - Added allow_integrated setting to GpuSettings for user control
+//   - Enhanced logging to show device priority order and selection rationale
+//   *** PERFORMANCE FIXES ***:
+//   - Prevents system slowdown from integrated GPU over-utilization
+//   - Ensures discrete GPUs are prioritized in multi-GPU systems
+//   - Reduces contention between integrated and discrete GPUs
+//   - Better resource allocation for maximum mining performance
+//   *** TECHNICAL IMPROVEMENTS ***:
+//   - Modified initialize() to sort devices by capability and type
+//   - Enhanced device info logging with type and priority information
+//   - Updated GpuSettings to include allow_integrated flag
+//   - Better integration with command-line --allow-integrated-gpu flag
 // - v3.2.2-luckypool-xn-nonce-fix (2025-06-26): LuckyPool XN nonce generation implementation.
 //   *** LUCKYPOOL XN NONCE GENERATION ***:
 //   - Implemented proper XN-based nonce generation in gpu_mining_loop_with_settings()
